@@ -1,0 +1,236 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from src.fbr.generator import FBRGenerator
+from src.fbr.qa import FBRQA, FBRAnswer
+
+
+# ============================================================
+# DATA STRUCTURES
+# ============================================================
+
+
+@dataclass
+class FBRAgentResponse:
+    """
+    Final response returned by the FBR agent.
+
+    The response contains:
+        - original question
+        - generated answer
+        - citations/sources
+        - retrieval statistics
+    """
+
+    question: str
+    answer: str
+    sources: list[dict[str, Any]]
+    retrieved_count: int
+    reranked_count: int
+
+
+# ============================================================
+# FBR AGENT
+# ============================================================
+
+
+class FBRAgent:
+    """
+    End-to-end FBR question-answering agent.
+
+    Pipeline:
+
+        User Question
+              ↓
+        FBRRetriever
+              ↓
+        FBRReranker
+              ↓
+        Citation Builder
+              ↓
+        Context Builder
+              ↓
+        Prompt Builder
+              ↓
+        FBRGenerator
+              ↓
+        Final Answer
+    """
+
+    def __init__(
+        self,
+        qa: FBRQA,
+        generator: FBRGenerator,
+    ):
+        if not isinstance(
+            qa,
+            FBRQA,
+        ):
+            raise TypeError(
+                "qa must be an instance of FBRQA"
+            )
+
+        if not isinstance(
+            generator,
+            FBRGenerator,
+        ):
+            raise TypeError(
+                "generator must be an instance of FBRGenerator"
+            )
+
+        self.qa = qa
+        self.generator = generator
+
+    # ========================================================
+    # PREPARE
+    # ========================================================
+
+    def prepare(
+        self,
+        question: str,
+    ) -> dict[str, Any]:
+        """
+        Prepare a question for generation.
+
+        This performs:
+
+            retrieval
+            reranking
+            citation building
+            context construction
+            prompt construction
+
+        No LLM call is made here.
+        """
+
+        return self.qa.prepare(
+            question
+        )
+
+    # ========================================================
+    # GENERATE
+    # ========================================================
+
+    def generate(
+        self,
+        prepared: dict[str, Any],
+    ) -> str:
+        """
+        Generate an answer from a prepared QA result.
+        """
+
+        return self.generator.generate_from_prepared(
+            prepared
+        )
+
+    # ========================================================
+    # ASK
+    # ========================================================
+
+    def ask(
+        self,
+        question: str,
+    ) -> FBRAgentResponse:
+        """
+        Run the complete FBR agent pipeline.
+
+        Steps:
+
+            1. Retrieve documents
+            2. Rerank documents
+            3. Build citations
+            4. Build grounded context
+            5. Build LLM prompt
+            6. Generate final answer
+            7. Return answer + sources
+        """
+
+        prepared = self.prepare(
+            question
+        )
+
+        answer = self.generate(
+            prepared
+        )
+
+        return FBRAgentResponse(
+            question=prepared[
+                "question"
+            ],
+            answer=answer,
+            sources=prepared[
+                "sources"
+            ],
+            retrieved_count=prepared[
+                "retrieved_count"
+            ],
+            reranked_count=prepared[
+                "reranked_count"
+            ],
+        )
+
+    # ========================================================
+    # EVIDENCE-ONLY MODE
+    # ========================================================
+
+    def ask_without_llm(
+        self,
+        question: str,
+    ) -> FBRAnswer:
+        """
+        Return an evidence-backed answer without
+        calling the LLM.
+
+        This is useful for:
+
+            - debugging retrieval
+            - testing citations
+            - inspecting evidence
+            - fallback behavior
+        """
+
+        return self.qa.answer_from_context(
+            question
+        )
+
+    # ========================================================
+    # FORMAT RESPONSE
+    # ========================================================
+
+    @staticmethod
+    def format_response(
+        response: FBRAgentResponse,
+    ) -> str:
+        """
+        Convert an FBRAgentResponse into a human-readable
+        response suitable for the Streamlit UI.
+        """
+
+        parts: list[str] = []
+
+        parts.append(
+            response.answer.strip()
+        )
+
+        if response.sources:
+
+            parts.append(
+                "\n\nSources:"
+            )
+
+            for source in response.sources:
+
+                citation = source.get(
+                    "citation",
+                    "Unknown source",
+                )
+
+                parts.append(
+                    f"- {citation}"
+                )
+
+        return "\n".join(
+            parts
+        )
