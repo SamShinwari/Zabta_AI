@@ -1,5 +1,6 @@
 from .embeddings import FBREmbeddings
 from .vector_store import FBRVectorStore
+from .citation import add_citation
 
 
 class FBRRetriever:
@@ -12,6 +13,8 @@ class FBRRetriever:
         FAISS similarity search
         +
         FBR metadata
+        +
+        Citation formatting
     """
 
     def __init__(
@@ -54,5 +57,10 @@ class FBRRetriever:
             query_embedding,
             top_k=k,
         )
+
+        results = [
+            add_citation(result)
+            for result in results
+        ]
 
         return results
