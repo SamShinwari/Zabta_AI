@@ -311,3 +311,22 @@ def test_invalid_generator():
             qa=qa,
             generator="invalid",
         )
+def test_format_response_uses_application_citations():
+    response = FBRAgentResponse(question="What is the standard sales tax rate?",answer=("The standard sales tax rate is 18%.\n\n""[ SOURCE 2 ]"),
+        sources=[
+            {
+                "citation": (
+                    "Sales Tax Act 1990 amended "
+                    "upto 30-06-2025.pdf, p. 27"
+                )
+            },
+        ],
+        retrieved_count=10,
+        reranked_count=5,
+    )
+
+    formatted = FBRAgent.format_response(response)
+
+    assert "The standard sales tax rate is 18%." in formatted
+    assert "[ SOURCE 2 ]" not in formatted
+    assert "[1] Sales Tax Act 1990 amended upto 30-06-2025.pdf, p. 27" in formatted
