@@ -133,3 +133,69 @@ class FBRQueryAnalyzer:
             years=years,
             legal_reference_query=legal_reference_query,
         )
+        # ========================================================
+    # RATE QUERY DETECTION
+    # ========================================================
+
+    RATE_KEYWORDS = (
+        "tax rate",
+        "sales tax rate",
+        "gst rate",
+        "rate of sales tax",
+        "rate of gst",
+        "standard rate",
+        "applicable rate",
+        "current rate",
+        "tax percentage",
+        "sales tax percentage",
+        "gst percentage",
+        "how much sales tax",
+        "how much gst",
+        "what rate",
+        "which rate",
+    )
+
+    def is_rate_query(self, query: str) -> bool:
+        """
+        Determine whether the user's question is asking
+        for a tax rate.
+        """
+
+        if not isinstance(query, str):
+            raise TypeError(
+                "query must be a string"
+            )
+
+        query = query.lower().strip()
+
+        if not query:
+            return False
+
+        return any(
+            keyword in query
+            for keyword in self.RATE_KEYWORDS
+        )
+        # ========================================================
+    # QUERY TYPE
+    # ========================================================
+
+    def query_type(self, query: str) -> str:
+        """
+        Classify the query for retrieval strategy.
+        """
+
+        if self.is_rate_query(query):
+            return "rate"
+
+        analysis = self.analyze(query)
+
+        if analysis.sections:
+            return "section"
+
+        if analysis.rules:
+            return "rule"
+
+        if analysis.sros:
+            return "sro"
+
+        return "general"

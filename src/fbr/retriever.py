@@ -28,6 +28,10 @@ class FBRRetriever:
              ↓
         Query Analyzer
              ↓
+        Query Type Detection
+             ↓
+        Candidate Size Selection
+             ↓
         BGE-M3 Embedding
              ↓
         FAISS Semantic Search
@@ -36,7 +40,11 @@ class FBRRetriever:
              ↓
         Legal Reference Boost
              ↓
-        Final Retrieval Results
+        Authority Scoring
+             ↓
+        Authority-Aware Ranking
+             ↓
+        Final Top-K Results
     """
 
     def __init__(
@@ -127,6 +135,188 @@ class FBRRetriever:
         self.query_analyzer = FBRQueryAnalyzer()
 
     # ========================================================
+    # AUTHORITY SCORING
+    # ========================================================
+
+    @staticmethod
+    def _authority_score(
+        source: str,
+        text: str = "",
+        query_type: str = "",
+    ) -> float:
+        """
+        Calculate document authority for retrieval.
+
+        Authority depends on:
+            - document type
+            - tax domain
+            - query type
+
+        For sales-tax rate queries, Sales Tax Act,
+        Finance Act, relevant SROs and notifications
+        receive higher priority.
+        """
+
+        source_lower = source.lower()
+        text_lower = text.lower()
+        query_type_lower = query_type.lower()
+
+        combined = (
+            f"{source_lower}\n{text_lower}"
+        )
+
+        # ----------------------------------------------------
+        # SALES TAX RATE QUERY
+        # ----------------------------------------------------
+
+        if (
+            query_type_lower == "rate"
+            or "sales tax rate" in query_type_lower
+        ):
+
+            # ------------------------------------------------
+            # SALES TAX ACT
+            # ------------------------------------------------
+
+            if "sales tax act" in combined:
+                return 1.00
+
+            # ------------------------------------------------
+            # FINANCE ACT
+            # ------------------------------------------------
+
+            if "finance act" in combined:
+                return 0.95
+
+            # ------------------------------------------------
+            # SALES TAX SRO
+            # ------------------------------------------------
+
+            if (
+                (
+                    "s.r.o." in combined
+                    or "sro" in combined
+                )
+                and "sales tax" in combined
+            ):
+                return 0.90
+
+            # ------------------------------------------------
+            # SALES TAX RULES
+            # ------------------------------------------------
+
+            if (
+                "sales tax rules" in combined
+                or "sales tax rule" in combined
+            ):
+                return 0.88
+
+            # ------------------------------------------------
+            # SALES TAX NOTIFICATION
+            # ------------------------------------------------
+
+            if (
+                "notification" in combined
+                and "sales tax" in combined
+            ):
+                return 0.82
+
+            # ------------------------------------------------
+            # SALES TAX CIRCULAR
+            # ------------------------------------------------
+
+            if (
+                "circular" in combined
+                and "sales tax" in combined
+            ):
+                return 0.75
+
+            # ------------------------------------------------
+            # INCOME TAX DOCUMENTS
+            # ------------------------------------------------
+
+            if (
+                "income tax ordinance" in combined
+                or "income tax act" in combined
+                or "income tax rules" in combined
+            ):
+                return 0.20
+
+            # ------------------------------------------------
+            # TAX EXPENDITURE / REPORTS
+            # ------------------------------------------------
+
+            if (
+                "tax expenditure" in combined
+                or "report" in combined
+                or "year book" in combined
+            ):
+                return 0.40
+
+            # ------------------------------------------------
+            # UNKNOWN
+            # ------------------------------------------------
+
+            return 0.30
+
+        # ====================================================
+        # NON-RATE QUERY
+        # ====================================================
+
+        # For non-rate questions, authority should have less
+        # influence. We still provide a useful document
+        # authority score for diagnostics.
+
+        if "sales tax act" in combined:
+            return 1.00
+
+        if "finance act" in combined:
+            return 0.95
+
+        if (
+            (
+                "s.r.o." in combined
+                or "sro" in combined
+            )
+            and "sales tax" in combined
+        ):
+            return 0.90
+
+        if (
+            "sales tax rules" in combined
+            or "sales tax rule" in combined
+        ):
+            return 0.88
+
+        if (
+            "notification" in combined
+            and "sales tax" in combined
+        ):
+            return 0.82
+
+        if (
+            "circular" in combined
+            and "sales tax" in combined
+        ):
+            return 0.75
+
+        if (
+            "income tax ordinance" in combined
+            or "income tax act" in combined
+            or "income tax rules" in combined
+        ):
+            return 0.20
+
+        if (
+            "tax expenditure" in combined
+            or "report" in combined
+            or "year book" in combined
+        ):
+            return 0.40
+
+        return 0.30
+
+    # ========================================================
     # LEGAL REFERENCE MATCHING
     # ========================================================
 
@@ -173,17 +363,12 @@ class FBRRetriever:
 
         for section in sections:
 
-            section = str(section).strip().lower()
+            section = str(
+                section
+            ).strip().lower()
 
             if not section:
                 continue
-
-            # Example:
-            #
-            # Section 8
-            # Section 8B
-            # section 8B.
-            #
 
             pattern = (
                 rf"\bsection\s+"
@@ -195,14 +380,6 @@ class FBRRetriever:
                 combined_text,
             ):
                 return True
-
-            # ------------------------------------------------
-            # Handle extracted PDF formats:
-            #
-            # 8B.
-            # 8B-
-            # 8B:
-            # ------------------------------------------------
 
             section_pattern = (
                 rf"\b{re.escape(section)}"
@@ -221,7 +398,9 @@ class FBRRetriever:
 
         for rule in rules:
 
-            rule = str(rule).strip().lower()
+            rule = str(
+                rule
+            ).strip().lower()
 
             if not rule:
                 continue
@@ -236,12 +415,6 @@ class FBRRetriever:
                 combined_text,
             ):
                 return True
-
-            # Handle formats such as:
-            #
-            # Rule 12.
-            # Rule 12-
-            #
 
             rule_pattern = (
                 rf"\brule\s+"
@@ -261,7 +434,9 @@ class FBRRetriever:
 
         for sro in sros:
 
-            sro = str(sro).strip().lower()
+            sro = str(
+                sro
+            ).strip().lower()
 
             if not sro:
                 continue
@@ -283,15 +458,20 @@ class FBRRetriever:
         """
         Search FBR documents using semantic similarity.
 
-        Pipeline:
+        Candidate strategy:
 
-            1. Validate query
-            2. Analyze query
-            3. Generate BGE-M3 embedding
-            4. Search FAISS
-            5. Match legal references
-            6. Apply legal-reference boost
-            7. Re-rank boosted results
+            Normal query:
+                candidate_k = top_k
+
+            Rate query:
+                candidate_k = max(50, top_k)
+
+        The larger candidate pool for rate queries allows
+        the system to consider older/newer Acts, Finance Acts,
+        SROs, notifications and other legal sources before
+        authority-aware ranking.
+
+        Final output is still limited to top_k.
         """
 
         # ----------------------------------------------------
@@ -322,8 +502,87 @@ class FBRRetriever:
         # Analyze query
         # ----------------------------------------------------
 
-        analysis = self.query_analyzer.analyze(
-            query
+        analysis = (
+            self.query_analyzer.analyze(
+                query
+            )
+        )
+
+        # ----------------------------------------------------
+        # Determine query type
+        # ----------------------------------------------------
+
+        query_type = ""
+
+        if hasattr(
+            self.query_analyzer,
+            "query_type",
+        ):
+
+            query_type = (
+                self.query_analyzer.query_type(
+                    query
+                )
+            )
+
+        elif hasattr(
+            analysis,
+            "query_type",
+        ):
+
+            query_type = (
+                analysis.query_type
+            )
+
+        # ----------------------------------------------------
+        # Detect rate query
+        # ----------------------------------------------------
+
+        is_rate_query = (
+            self.query_analyzer.is_rate_query(
+                query
+            )
+        )
+
+        # ====================================================
+        # CANDIDATE SIZE
+        # ====================================================
+
+        if is_rate_query:
+
+            # ------------------------------------------------
+            # Rate queries require broader retrieval.
+            #
+            # We want to compare:
+            #
+            #   - current Sales Tax Act
+            #   - Finance Act
+            #   - SROs
+            #   - Notifications
+            #   - Rules
+            #   - older versions
+            #
+            # before final ranking.
+            # ------------------------------------------------
+
+            candidate_k = max(
+                50,
+                top_k,
+            )
+
+        else:
+
+            # ------------------------------------------------
+            # Normal semantic retrieval
+            # ------------------------------------------------
+
+            candidate_k = top_k
+
+        # Never ask FAISS for more vectors than exist.
+
+        candidate_k = min(
+            candidate_k,
+            self.index.ntotal,
         )
 
         # ----------------------------------------------------
@@ -339,13 +598,20 @@ class FBRRetriever:
         query_embedding = np.asarray(
             query_embedding,
             dtype=np.float32,
-        ).reshape(1, -1)
+        ).reshape(
+            1,
+            -1,
+        )
 
         # ----------------------------------------------------
         # Validate embedding dimension
         # ----------------------------------------------------
 
-        if query_embedding.shape[1] != self.index.d:
+        if (
+            query_embedding.shape[1]
+            != self.index.d
+        ):
+
             raise ValueError(
                 "Query embedding dimension does not "
                 "match FAISS index: "
@@ -353,27 +619,29 @@ class FBRRetriever:
                 f"index={self.index.d}"
             )
 
-        # ----------------------------------------------------
-        # FAISS search
-        # ----------------------------------------------------
+        # ====================================================
+        # FAISS CANDIDATE SEARCH
+        # ====================================================
 
-        actual_k = min(
-            top_k,
-            self.index.ntotal,
-        )
-
-        scores, indices = self.index.search(
-            query_embedding,
-            actual_k,
+        scores, indices = (
+            self.index.search(
+                query_embedding,
+                candidate_k,
+            )
         )
 
         # ----------------------------------------------------
-        # Build results
+        # Build candidate results
         # ----------------------------------------------------
 
-        results: list[dict[str, Any]] = []
+        results: list[
+            dict[str, Any]
+        ] = []
 
-        for rank, (score, index_id) in enumerate(
+        for candidate_rank, (
+            score,
+            index_id,
+        ) in enumerate(
             zip(
                 scores[0],
                 indices[0],
@@ -389,12 +657,22 @@ class FBRRetriever:
             ]
 
             result = {
-                "rank": rank,
-                "score": float(score),
+                # Candidate rank before
+                # re-ranking.
+                "candidate_rank": (
+                    candidate_rank
+                ),
+
+                # Original FAISS score.
+                "score": float(
+                    score
+                ),
+
                 "text": record.get(
                     "text",
                     "",
                 ),
+
                 "metadata": record.get(
                     "metadata",
                     {},
@@ -405,19 +683,27 @@ class FBRRetriever:
                 result
             )
 
-        # ----------------------------------------------------
-        # Legal-reference boost
-        # ----------------------------------------------------
+        # ====================================================
+        # LEGAL REFERENCE BOOST
+        # ====================================================
 
         if analysis.has_legal_reference():
 
             for result in results:
 
-                matched = self._legal_reference_match(
-                    result=result,
-                    sections=analysis.sections,
-                    rules=analysis.rules,
-                    sros=analysis.sros,
+                matched = (
+                    self._legal_reference_match(
+                        result=result,
+                        sections=(
+                            analysis.sections
+                        ),
+                        rules=(
+                            analysis.rules
+                        ),
+                        sros=(
+                            analysis.sros
+                        ),
+                    )
                 )
 
                 result[
@@ -426,48 +712,199 @@ class FBRRetriever:
 
                 if matched:
 
+                    # Preserve original FAISS
+                    # score before boosting.
+
                     result[
                         "original_score"
-                    ] = result["score"]
+                    ] = result[
+                        "score"
+                    ]
 
                     result[
                         "score"
                     ] += 0.10
 
-        # ----------------------------------------------------
-        # Re-sort results
-        # ----------------------------------------------------
+        else:
+
+            # Keep output structure consistent.
+
+            for result in results:
+
+                result[
+                    "legal_reference_match"
+                ] = False
+
+        # ====================================================
+        # AUTHORITY-AWARE RANKING
+        # ====================================================
+
+        if is_rate_query:
+
+            for result in results:
+
+                # ------------------------------------------------
+                # Metadata
+                # ------------------------------------------------
+
+                metadata = result.get(
+                    "metadata",
+                    {},
+                )
+
+                # ------------------------------------------------
+                # Source
+                # ------------------------------------------------
+
+                source = metadata.get(
+                    "source",
+                    "",
+                )
+
+                # ------------------------------------------------
+                # Authority
+                # ------------------------------------------------
+
+                authority = (
+                    self._authority_score(
+                        source=source,
+                        text=result.get(
+                            "text",
+                            "",
+                        ),
+                        query_type=query_type
+                        or "rate",
+                    )
+                )
+
+                result[
+                    "authority_score"
+                ] = float(
+                    authority
+                )
+
+                # ------------------------------------------------
+                # Semantic score
+                # ------------------------------------------------
+
+                semantic_score = float(
+                    result.get(
+                        "score",
+                        0.0,
+                    )
+                )
+
+                # ------------------------------------------------
+                # Retrieval score
+                #
+                # 80% semantic relevance
+                # 20% authority
+                # ------------------------------------------------
+
+                result[
+                    "retrieval_score"
+                ] = (
+                    0.80
+                    * semantic_score
+                    +
+                    0.20
+                    * authority
+                )
+
+        else:
+
+            # ------------------------------------------------
+            # Normal query
+            #
+            # Do not alter normal semantic ranking.
+            # ------------------------------------------------
+
+            for result in results:
+
+                result[
+                    "retrieval_score"
+                ] = float(
+                    result.get(
+                        "score",
+                        0.0,
+                    )
+                )
+
+        # ====================================================
+        # FINAL SORT
+        # ====================================================
 
         results.sort(
-            key=lambda item: item["score"],
+            key=lambda item: item[
+                "retrieval_score"
+            ],
             reverse=True,
         )
 
-        # ----------------------------------------------------
-        # Reassign ranks
-        # ----------------------------------------------------
+        # ====================================================
+        # FINAL TOP-K
+        # ====================================================
+
+        # We may have retrieved 50 candidates for a rate
+        # query, but the caller still receives only top_k.
+
+        results = results[
+            :top_k
+        ]
+
+        # ====================================================
+        # FINAL RANK
+        # ====================================================
 
         for rank, result in enumerate(
             results,
             start=1,
         ):
 
-            result["rank"] = rank
+            result[
+                "rank"
+            ] = rank
 
-        # ----------------------------------------------------
-        # Add query analysis information
-        # ----------------------------------------------------
+        # ====================================================
+        # QUERY ANALYSIS INFORMATION
+        # ====================================================
 
         for result in results:
 
             result[
                 "query_analysis"
             ] = {
-                "sections": analysis.sections,
-                "rules": analysis.rules,
-                "sros": analysis.sros,
+
+                "sections": (
+                    analysis.sections
+                ),
+
+                "rules": (
+                    analysis.rules
+                ),
+
+                "sros": (
+                    analysis.sros
+                ),
+
                 "has_legal_reference": (
                     analysis.has_legal_reference()
+                ),
+
+                "is_rate_query": (
+                    is_rate_query
+                ),
+
+                "query_type": (
+                    query_type
+                ),
+
+                "candidate_k": (
+                    candidate_k
+                ),
+
+                "final_top_k": (
+                    top_k
                 ),
             }
 
@@ -478,7 +915,9 @@ class FBRRetriever:
     # ========================================================
 
     @property
-    def vector_count(self) -> int:
+    def vector_count(
+        self,
+    ) -> int:
         """
         Number of vectors stored in FAISS.
         """
@@ -488,7 +927,9 @@ class FBRRetriever:
         )
 
     @property
-    def dimension(self) -> int:
+    def dimension(
+        self,
+    ) -> int:
         """
         Embedding/vector dimension.
         """
