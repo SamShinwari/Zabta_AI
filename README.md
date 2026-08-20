@@ -1,5 +1,5 @@
 # 🇵🇰 Zabta
-## AI-Powered FBR Sales Tax & Invoice Validation Assistant
+## AI-Powered FBR Sales Tax Filing Helper for Pakistani SMEs
 
 Zabta is an AI-assisted Pakistan Federal Board of Revenue (FBR) sales-tax compliance system that combines **Retrieval-Augmented Generation (RAG)**, **BGE-M3 embeddings**, **FAISS vector search**, **deterministic tax-rule resolution**, **date-aware applicability**, and an optional **local Llama 3.1 8B explanation layer through Ollama and LangChain**.
 
