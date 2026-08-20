@@ -33,12 +33,14 @@ class FBRCitationBuilder:
         )
 
         if page is not None:
-            citation = (
-        
-                f"{source}, p. {page}"
-            )
+            citation = f"{source}, p. {page}"
         else:
             citation = source
+
+        # The public citation string includes the stable citation
+        # number expected by application output and tests.
+        if citation_number is not None:
+            citation = f"[{citation_number}] {citation}"
 
         return {
             "id": citation_number,

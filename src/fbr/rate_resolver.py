@@ -597,18 +597,22 @@ class FBRRateResolver:
             return 0.5
 
         # ----------------------------------------------------
-        # Document cutoff is after invoice date.
+        # Future documents are not temporally relevant.
+        # ----------------------------------------------------
+
+        if cutoff > invoice:
+            return 0.0
+
+        # ----------------------------------------------------
+        # Older documents receive a decreasing relevance score.
+        # This is a retrieval signal, not legal proof of
+        # continuous effectiveness.
         #
-        # This document can contain rules applicable
-        # to the invoice date.
-        # ----------------------------------------------------
-
-        if cutoff <= invoice:
-            return 1.0
-        return 0.0
-
-        # ----------------------------------------------------
-        # Older documents receive a decreasing score.
+        # Roughly:
+        #   current document -> 1.00
+        #   1 year old      -> 0.80
+        #   3 years old     -> 0.40
+        #   5+ years old    -> 0.00
         # ----------------------------------------------------
 
         age_days = (
