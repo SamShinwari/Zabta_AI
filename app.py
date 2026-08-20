@@ -9,6 +9,16 @@ import streamlit as st
 from src.invoice.invoice_parser import InvoiceParser
 from src.invoice.invoice_validation_service import InvoiceValidationService
 from src.fbr.current_rate_service import FBRCurrentRateService
+from src.fbr.invoice_rate_resolver import FBRInvoiceRateResolver
+
+try:
+    from langchain_ollama import ChatOllama
+    from langchain_core.messages import HumanMessage
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    ChatOllama = None
+    HumanMessage = None
+    OLLAMA_AVAILABLE = False
 
 try:
     from src.fbr.invoice_rate_query import FBRInvoiceRateQuery
@@ -23,54 +33,89 @@ st.set_page_config(
 )
 
 
-# ============================================================
-# INSTITUTION / PROJECT LOGOS
-# ============================================================
-
-BASE_DIR = Path(__file__).resolve().parent
-ASSETS_DIR = BASE_DIR / "assets"
-
-GIKI_LOGO = ASSETS_DIR / "gikilogo.png"
-SKYLAB_LOGO = ASSETS_DIR / "ailogo.png"
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-logo_left, title_col, logo_right = st.columns(
-    [1, 4, 1],
-    vertical_alignment="center",
+st.title("🇵🇰 Zabta")
+st.subheader(
+    "AI-Powered FBR Sales Tax & Invoice Validation Assistant"
 )
 
-with logo_left:
-    if GIKI_LOGO.exists():
-        st.image(
-            str(GIKI_LOGO),
-            width=105,
-        )
+st.markdown(
+    """
+Zabta combines **RAG-based FBR document retrieval** with
+**deterministic invoice tax validation**.
 
-with title_col:
-    st.markdown(
-        "<h1 style='text-align:center; margin-bottom:0;'>🇵🇰 Zabta</h1>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<h1 style='text-align:center; font-size:1.55rem;'>"
-        "AI-Powered FBR Sales Tax Filing Helper for Pakistani SMEs"
-        "</h1>",
-        unsafe_allow_html=True,
-    )
+### AI Pipeline
 
-with logo_right:
-    if SKYLAB_LOGO.exists():
-        st.image(
-            str(SKYLAB_LOGO),
-            width=120,
-        )
-
+`Invoice Information → Query Construction → FBR Retrieval → Rate Extraction → Rate Classification → Date Applicability → Final Tax Resolution`
+"""
+)
 
 st.divider()
+
+st.info(
+    "Hybrid AI: BGE-M3 + FAISS retrieve FBR evidence; "
+    "the deterministic Python resolver decides the rate; "
+    "Llama 3.1 via Ollama + LangChain generates the explanation."
+)
+
+
+@st.cache_resource
+def initialize_llm(model_name: str):
+    if not OLLAMA_AVAILABLE:
+        return None
+    return ChatOllama(
+        model=model_name,
+        temperature=0,
+    )
+
+
+def generate_llm_explanation(
+    llm,
+    item_description,
+    hs_code,
+    invoice_date,
+    purchase_type,
+    invoice_type,
+    resolved_rate,
+    category,
+    confidence,
+    source,
+    page,
+    evidence_text,
+):
+    prompt = f"""
+You are the explanation layer of Zabta, an FBR sales-tax
+compliance assistant.
+
+The deterministic Python tax resolver has already selected
+the applicable rate. Do NOT change, invent, or recalculate it.
+
+Invoice:
+Item: {item_description}
+HS Code: {hs_code or "Not provided"}
+Invoice date: {invoice_date}
+Purchase type: {purchase_type}
+Invoice type: {invoice_type}
+
+Deterministic result:
+Applicable rate: {resolved_rate}%
+Category: {category}
+Confidence: {confidence}
+FBR source: {source}
+Page: {page}
+
+Retrieved FBR evidence:
+{evidence_text}
+
+Give a concise explanation suitable for a viva/demo dashboard.
+Explain why the evidence supports the classification and why
+the invoice date matters. Mention the source and page.
+Use only the supplied evidence. Do not invent legal provisions.
+"""
+    response = llm.invoke([HumanMessage(content=prompt)])
+    content = getattr(response, "content", response)
+    if isinstance(content, list):
+        content = "\n".join(str(x) for x in content)
+    return str(content)
 
 
 with st.sidebar:
@@ -87,6 +132,25 @@ with st.sidebar:
         max_value=20,
         value=10,
     )
+
+    st.divider()
+
+    st.header("🧠 Local LLM")
+    ollama_model = st.text_input(
+        "Ollama Model",
+        value="llama3.1:8b",
+    )
+    use_ollama = st.checkbox(
+        "Enable Llama 3.1 explanation",
+        value=True,
+        disabled=not OLLAMA_AVAILABLE,
+    )
+
+    if not OLLAMA_AVAILABLE:
+        st.warning(
+            "Install LangChain Ollama with: "
+            "pip install langchain-ollama"
+        )
 
     st.divider()
 
@@ -130,6 +194,10 @@ try:
     parser, current_rate_service, validation_service = (
         initialize_services(vector_dir, retrieval_top_k)
     )
+    invoice_rate_resolver = FBRInvoiceRateResolver(
+        current_rate_service=current_rate_service
+    )
+    llm = initialize_llm(ollama_model) if use_ollama else None
 except Exception as exc:
     st.error("❌ Could not initialize Zabta.")
     st.exception(exc)
@@ -369,7 +437,6 @@ run_validation = st.button(
 
 if run_validation:
     results = []
-
     progress = st.progress(0)
     status_text = st.empty()
 
@@ -378,142 +445,171 @@ if run_validation:
             f"Processing invoice {index + 1} of {len(df)}..."
         )
 
-        try:
-            result = validation_service.validate(row.to_dict())
+        invoice_number = row.get("invoice_number", "")
+        item_description = str(row.get("item_description", ""))
+        hs_code = row.get("hs_code", None)
+        if pd.isna(hs_code):
+            hs_code = None
+        elif hs_code is not None:
+            hs_code = str(hs_code)
 
-            results.append(
-                {
-                    "invoice_number": getattr(
-                        result,
-                        "invoice_number",
-                        row.get("invoice_number", ""),
-                    ),
-                    "invoice_date": getattr(
-                        result,
-                        "invoice_date",
-                        row.get("invoice_date", ""),
-                    ),
-                    "item_description": getattr(
-                        result,
-                        "item_description",
-                        row.get("item_description", ""),
-                    ),
-                    "declared_rate": getattr(
-                        result,
-                        "declared_rate",
-                        row.get("gst_rate", None),
-                    ),
-                    "applicable_rate": getattr(
-                        result,
-                        "applicable_rate",
-                        None,
-                    ),
-                    "taxable_amount": getattr(
-                        result,
-                        "taxable_amount",
-                        row.get("taxable_amount", 0),
-                    ),
-                    "declared_tax": getattr(
-                        result,
-                        "declared_tax",
-                        row.get("tax_amount", 0),
-                    ),
-                    "expected_tax": getattr(
-                        result,
-                        "expected_tax",
-                        None,
-                    ),
-                    "rate_match": getattr(
-                        result,
-                        "rate_match",
-                        False,
-                    ),
-                    "tax_match": getattr(
-                        result,
-                        "tax_match",
-                        False,
-                    ),
-                    "category": getattr(
-                        result,
-                        "category",
-                        "unknown",
-                    ),
-                    "confidence": getattr(
-                        result,
-                        "confidence",
-                        0.0,
-                    ),
-                    "source": getattr(
-                        result,
-                        "source",
-                        "",
-                    ),
-                    "page": getattr(
-                        result,
-                        "page",
-                        None,
-                    ),
-                    "status": getattr(
-                        result,
-                        "status",
-                        "UNKNOWN",
-                    ),
-                    "explanation": getattr(
-                        result,
-                        "explanation",
-                        "",
-                    ),
-                }
+        invoice_date = str(row.get("invoice_date", ""))
+        purchase_type = str(row.get("purchase_type", "local purchase"))
+        invoice_type = str(row.get("invoice_type", "taxable"))
+
+        try:
+            query = FBRInvoiceRateResolver.build_query(
+                item_description=item_description,
+                hs_code=hs_code,
+                invoice_date=invoice_date,
+                purchase_type=purchase_type,
+                invoice_type=invoice_type,
             )
+
+            evidence = current_rate_service.retrieve(query)
+            if not evidence:
+                raise LookupError("No FBR evidence was retrieved.")
+
+            resolution = invoice_rate_resolver.resolve(
+                item_description=item_description,
+                hs_code=hs_code,
+                invoice_date=invoice_date,
+                purchase_type=purchase_type,
+                invoice_type=invoice_type,
+            )
+
+            resolved_rate = getattr(resolution, "rate", None)
+            if resolved_rate is None:
+                resolved_rate = getattr(
+                    resolution,
+                    "applicable_rate",
+                    None,
+                )
+
+            category = getattr(resolution, "category", "unknown")
+            confidence = getattr(resolution, "confidence", 0.0)
+            source = getattr(resolution, "source", "")
+            page = getattr(resolution, "page", None)
+
+            taxable_amount = float(row.get("taxable_amount", 0) or 0)
+            declared_tax = float(row.get("tax_amount", 0) or 0)
+
+            declared_rate = row.get("gst_rate", None)
+            declared_rate_percent = None
+            if pd.notna(declared_rate):
+                declared_rate_percent = float(declared_rate)
+                if declared_rate_percent <= 1:
+                    declared_rate_percent *= 100
+
+            expected_tax = (
+                taxable_amount * float(resolved_rate) / 100
+                if resolved_rate is not None
+                else None
+            )
+
+            rate_match = (
+                declared_rate_percent is not None
+                and resolved_rate is not None
+                and abs(
+                    declared_rate_percent - float(resolved_rate)
+                ) < 0.0001
+            )
+
+            tax_match = (
+                expected_tax is not None
+                and abs(declared_tax - expected_tax) < 0.01
+            )
+
+            if not rate_match:
+                status = "RATE MISMATCH"
+            elif not tax_match:
+                status = "TAX MISMATCH"
+            else:
+                status = "VALID"
+
+            supporting_text = ""
+            for item in evidence:
+                meta = item.get("metadata", {})
+                if (
+                    meta.get("source", "") == source
+                    and meta.get("page", None) == page
+                ):
+                    supporting_text = item.get("text", "")
+                    break
+
+            if not supporting_text and evidence:
+                supporting_text = evidence[0].get("text", "")
+
+            ai_explanation = ""
+            if llm is not None:
+                try:
+                    ai_explanation = generate_llm_explanation(
+                        llm,
+                        item_description,
+                        hs_code,
+                        invoice_date,
+                        purchase_type,
+                        invoice_type,
+                        resolved_rate,
+                        category,
+                        confidence,
+                        source,
+                        page,
+                        supporting_text,
+                    )
+                except Exception as exc:
+                    ai_explanation = (
+                        f"Llama explanation unavailable: {exc}"
+                    )
+
+            results.append({
+                "invoice_number": invoice_number,
+                "invoice_date": invoice_date,
+                "item_description": item_description,
+                "declared_rate": declared_rate_percent,
+                "applicable_rate": resolved_rate,
+                "taxable_amount": taxable_amount,
+                "declared_tax": declared_tax,
+                "expected_tax": expected_tax,
+                "rate_match": rate_match,
+                "tax_match": tax_match,
+                "category": category,
+                "confidence": confidence,
+                "source": source,
+                "page": page,
+                "status": status,
+                "explanation": ai_explanation,
+                "query": query,
+                "supporting_text": supporting_text,
+            })
 
         except Exception as exc:
-            results.append(
-                {
-                    "invoice_number": row.get(
-                        "invoice_number",
-                        "",
-                    ),
-                    "invoice_date": row.get(
-                        "invoice_date",
-                        "",
-                    ),
-                    "item_description": row.get(
-                        "item_description",
-                        "",
-                    ),
-                    "declared_rate": row.get(
-                        "gst_rate",
-                        None,
-                    ),
-                    "applicable_rate": None,
-                    "taxable_amount": row.get(
-                        "taxable_amount",
-                        0,
-                    ),
-                    "declared_tax": row.get(
-                        "tax_amount",
-                        0,
-                    ),
-                    "expected_tax": None,
-                    "rate_match": False,
-                    "tax_match": False,
-                    "category": "error",
-                    "confidence": 0.0,
-                    "source": "",
-                    "page": None,
-                    "status": "ERROR",
-                    "explanation": str(exc),
-                }
-            )
+            results.append({
+                "invoice_number": invoice_number,
+                "invoice_date": invoice_date,
+                "item_description": item_description,
+                "declared_rate": None,
+                "applicable_rate": None,
+                "taxable_amount": row.get("taxable_amount", 0),
+                "declared_tax": row.get("tax_amount", 0),
+                "expected_tax": None,
+                "rate_match": False,
+                "tax_match": False,
+                "category": "error",
+                "confidence": 0.0,
+                "source": "",
+                "page": None,
+                "status": "ERROR",
+                "explanation": str(exc),
+                "query": "",
+                "supporting_text": "",
+            })
 
         progress.progress((index + 1) / len(df))
 
     status_text.empty()
     progress.empty()
-
-    validation_df = pd.DataFrame(results)
-
-    st.session_state["validation_results"] = validation_df
+    st.session_state["validation_results"] = pd.DataFrame(results)
 
 
 if "validation_results" in st.session_state:
@@ -840,61 +936,15 @@ compared the resolved FBR rate with the invoice rate.
             )
 
             if show_supporting_text:
-                try:
-                    supporting_query = build_demo_query(
-                        selected
-                    )
-
-                    supporting_results = (
-                        current_rate_service.retrieve(
-                            supporting_query
-                        )
-                    )
-
-                    found = False
-
-                    for evidence in supporting_results:
-                        evidence_metadata = evidence.get(
-                            "metadata",
-                            {},
-                        )
-
-                        evidence_source = (
-                            evidence_metadata.get(
-                                "source",
-                                "",
-                            )
-                        )
-
-                        evidence_page = (
-                            evidence_metadata.get(
-                                "page",
-                                None,
-                            )
-                        )
-
-                        if (
-                            evidence_source == source
-                            and evidence_page == page
-                        ):
-                            st.text(
-                                evidence.get(
-                                    "text",
-                                    "",
-                                )
-                            )
-                            found = True
-                            break
-
-                    if not found:
-                        st.info(
-                            "Matching supporting FBR text was not found "
-                            "in the retrieved top-K evidence."
-                        )
-
-                except Exception as exc:
-                    st.warning(
-                        f"Could not retrieve supporting text: {exc}"
+                supporting_text = selected.get(
+                    "supporting_text",
+                    "",
+                )
+                if supporting_text:
+                    st.text(supporting_text)
+                else:
+                    st.info(
+                        "No supporting FBR text was stored for this result."
                     )
 
     st.divider()
@@ -916,36 +966,7 @@ compared the resolved FBR rate with the invoice rate.
 
 st.divider()
 
-# ============================================================
-# FOOTER / PARTNER LOGOS
-# ============================================================
-
-st.divider()
-
-footer_left, footer_center, footer_right = st.columns(
-    [1, 4, 1],
-    vertical_alignment="center",
+st.caption(
+    "Zabta — FBR Sales Tax Compliance Assistant | "
+    "RAG-based FBR knowledge retrieval"
 )
-
-with footer_left:
-    if GIKI_LOGO.exists():
-        st.image(
-            str(GIKI_LOGO),
-            width=80,
-        )
-
-with footer_center:
-    st.markdown(
-        "<p style='text-align:center; margin-top:20px;'>"
-        "<b>Zabta</b> — FBR Sales Tax Compliance Assistant<br>"
-        "RAG-based FBR knowledge retrieval"
-        "</p>",
-        unsafe_allow_html=True,
-    )
-
-with footer_right:
-    if SKYLAB_LOGO.exists():
-        st.image(
-            str(SKYLAB_LOGO),
-            width=95,
-        )
