@@ -35,7 +35,7 @@ st.set_page_config(
 
 st.title("🇵🇰 Zabta")
 st.subheader(
-    "AI-Powered FBR Sales Tax & Invoice Validation Assistant"
+    "AI-Powered FBR Sales Tax Filing Helper for Pakistani SMEs"
 )
 
 st.markdown(
